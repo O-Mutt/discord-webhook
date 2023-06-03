@@ -1,8 +1,10 @@
 import * as core from '@actions/core'
+import {Embed, EmbedKey} from './embed'
 import {createReadStream, readFileSync} from 'fs'
 import FormData from 'form-data'
 import {HttpClient} from '@actions/http-client'
 import {TypedResponse} from '@actions/http-client/lib/interfaces'
+import get from 'lodash.get'
 
 const WEBHOOK_URL = 'webhook-url'
 const CONTENT = 'content'
@@ -21,11 +23,13 @@ const FILENAME = 'filename'
 const THREAD_ID = 'thread-id'
 
 const TOP_LEVEL_WEBHOOK_KEYS = [CONTENT, USERNAME, AVATAR_URL]
-const EMBED_KEYS = [TITLE, DESCRIPTION, TIMESTAMP, COLOR, URL]
-const EMBED_AUTHOR_KEYS = [NAME, URL, ICON_URL]
-const EMBED_FOOTER_KEYS = [TEXT, ICON_URL]
-const EMBED_IMAGE_KEYS = [URL]
-const EMBED_THUMBNAIL_KEYS = [URL]
+const EMBED_KEYS: Embed = {
+  '': [TITLE, DESCRIPTION, TIMESTAMP, COLOR, URL],
+  author: [NAME, URL, ICON_URL],
+  footer: [TEXT, ICON_URL],
+  image: [URL],
+  thumbnail: [URL]
+}
 
 const DESCRIPTION_LIMIT = 4096
 
@@ -36,20 +40,126 @@ function createPayload(): Record<string, unknown> {
     return JSON.parse(readFileSync(rawData, 'utf-8'))
   }
 
-  const webhookPayloadMap = parseMapFromParameters(TOP_LEVEL_WEBHOOK_KEYS)
+  const webhookPayloadMap = parseTopLevelWebhookKeys()
   const embedPayloadMap = createEmbedObject()
-  if (embedPayloadMap.size > 0) {
-    webhookPayloadMap.set('embeds', [Object.fromEntries(embedPayloadMap)])
+  if (embedPayloadMap.length > 0) {
+    webhookPayloadMap.set(
+      'embeds',
+      embedPayloadMap.map(e => Object.fromEntries(e))
+    )
   }
   const webhookPayload = Object.fromEntries(webhookPayloadMap)
   core.info(JSON.stringify(webhookPayload))
   return webhookPayload
 }
 
-function createEmbedObject(): Map<string, unknown> {
-  const embedPayloadMap = parseMapFromParameters(EMBED_KEYS, 'embed')
+function parseTopLevelWebhookKeys(): Map<string, unknown> {
+  // Parse action inputs into discord webhook execute payload
+  const parameterMap = new Map<string, unknown>()
 
-  if (embedPayloadMap.size > 0) {
+  for (const parameter of TOP_LEVEL_WEBHOOK_KEYS) {
+    const inputKey = parameter
+    let value = core.getInput(inputKey)
+    if (value === '') {
+      continue
+    }
+
+    if (parameter === TIMESTAMP) {
+      const parsedDate = new Date(value)
+      value = parsedDate.toISOString()
+    }
+
+    if (parameter === DESCRIPTION) {
+      if (value.length > DESCRIPTION_LIMIT) {
+        value = value.substring(0, DESCRIPTION_LIMIT)
+      }
+    }
+
+    core.info(`${inputKey}: ${value}`)
+    if (value.length > 0) parameterMap.set(parameter.replace('-', '_'), value)
+  }
+
+  return parameterMap
+}
+
+function createEmbedObject(): Map<string, unknown>[] {
+  const value = core.getInput('embeds')
+  if (value) {
+    try {
+      const json = JSON.parse(value) as unknown[]
+      const embedPayloadMap = getEmbedValues(json)
+      return embedPayloadMap
+    } catch (e) {
+      core.error(
+        'User specified embeds but json value is malformed. Error printed below:'
+      )
+      core.error(JSON.stringify(e))
+    }
+  }
+  const embedPayloadMap = getEmbedValues()
+  return embedPayloadMap
+}
+
+function getEmbedValues(inputEmbeds?: unknown[]): Map<string, unknown>[] {
+  // Parse action inputs into discord webhook execute payload
+  const parameterMap = new Array<Map<string, unknown>>(inputEmbeds?.length ?? 1)
+
+  let hasRootEmbed = false
+  let subObjectKey: EmbedKey
+  for (subObjectKey in EMBED_KEYS) {
+    for (const parameter of EMBED_KEYS[subObjectKey]) {
+      const discordEmbedKey = `${subObjectKey}_${parameter}`
+      const inputKey = `${subObjectKey}-${parameter}`
+      let value: string | undefined
+      if (inputEmbeds?.length) {
+        for (const [index, emb] of inputEmbeds.entries()) {
+          value = get(emb, inputKey, undefined)
+          value = parseValueByParameterType(parameter, value)
+          if (value === '') {
+            continue
+          }
+          parameterMap[index].set(discordEmbedKey, value)
+        }
+      } else {
+        value = core.getInput(inputKey)
+        value = parseValueByParameterType(parameter, value)
+        if (value === '') {
+          continue
+        }
+        if (value && subObjectKey && hasRootEmbed === true) {
+          if (!subObjectKey) hasRootEmbed = true
+          parameterMap[0].set(discordEmbedKey, value)
+        }
+      }
+    }
+  }
+
+  return parameterMap
+}
+
+function parseValueByParameterType(
+  parameter: string,
+  value?: string
+): string | undefined {
+  if (value === undefined || value === '') return
+  core.debug(`Parsing ${parameter}`)
+  if (parameter === TIMESTAMP) {
+    const parsedDate = new Date(value)
+    value = parsedDate.toISOString()
+  }
+
+  if (parameter === DESCRIPTION) {
+    if (value.length > DESCRIPTION_LIMIT) {
+      value = `${value.substring(0, DESCRIPTION_LIMIT - 3)}...`
+    }
+  }
+
+  if (value.length > 0) return value
+}
+
+/*
+
+if (embedPayloadMap.size > 0) {
     const embedAuthorMap = parseMapFromParameters(
       EMBED_AUTHOR_KEYS,
       'embed-author'
@@ -80,43 +190,7 @@ function createEmbedObject(): Map<string, unknown> {
     }
   }
 
-  return embedPayloadMap
-}
-
-function parseMapFromParameters(
-  parameters: string[],
-  inputObjectKey = ''
-): Map<string, unknown> {
-  // Parse action inputs into discord webhook execute payload
-  const parameterMap = new Map<string, unknown>()
-  core.info(`inputObjectKey: ${inputObjectKey}`)
-
-  for (const parameter of parameters) {
-    const inputKey =
-      inputObjectKey !== '' ? `${inputObjectKey}-${parameter}` : parameter
-    let value = core.getInput(inputKey)
-    if (value === '') {
-      continue
-    }
-
-    if (parameter === TIMESTAMP) {
-      const parsedDate = new Date(value)
-      value = parsedDate.toISOString()
-    }
-
-    if (parameter === DESCRIPTION) {
-      if (value.length > DESCRIPTION_LIMIT) {
-        value = value.substring(0, DESCRIPTION_LIMIT)
-      }
-    }
-
-    core.info(`${inputKey}: ${value}`)
-    if (value.length > 0) parameterMap.set(parameter.replace('-', '_'), value)
-  }
-
-  return parameterMap
-}
-
+  */
 async function handleResponse(response: TypedResponse<unknown>): Promise<void> {
   core.info(
     `Webhook returned ${response.statusCode} with message: ${response.result}. Please see discord documentation at https://discord.com/developers/docs/resources/webhook#execute-webhook for more information`

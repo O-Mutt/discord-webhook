@@ -29,6 +29,9 @@ inputs:
   filename:
     description: 'Name of a file that will be uploaded via the webhook'
     required: false
+  embeds:
+    description: 'Array of embed objects'
+    required: false
   embed-title:
     description: 'Embed title'
     required: false
